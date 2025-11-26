@@ -1,6 +1,21 @@
-name: Build Manager
+name: Build Manager Fork
 
 on:
+  # 新增手动触发配置
+  workflow_dispatch:  # <- 新增触发器
+    inputs:
+      target_branch:  # <- 触发时选择构建分支
+        description: '构建目标分支'
+        required: true
+        default: 'main'
+        type: choice
+        options: [main, dev, ci]
+      build_type:  # <- 触发时选择构建类型
+        description: '构建类型'
+        required: true
+        default: 'release'
+        type: choice
+        options: [debug, release]
   push:
     branches: [ "main", "dev", "ci" ]
     paths:
