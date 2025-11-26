@@ -1,0 +1,115 @@
+name: Build Manager with Manual Trigger
+
+# 1. 定义触发事件
+on:
+  # 手动触发事件（核心配置）
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: '要构建的代码所在分支'
+        required: true
+        default: 'main'
+        type: choice
+        options:
+          - main
+          - dev
+          - ci
+      build_type:
+        description: '选择构建类型'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - debug
+          - release
+      enable_upload:
+        description: '是否启用上传功能'
+        required: false
+        default: true
+        type: boolean
+      custom_message:
+        description: '自定义构建信息（可选）'
+        required: false
+        default: '由手动触发发起的构建'
+        type: string
+
+  # 保留你原有的自动触发条件（根据需要保留或调整）
+  push:
+    branches: [ "main", "dev", "ci" ]
+    paths:
+      - '.github/workflows/build-manager.yml'
+      - 'manager/**'
+      - 'kernel/**'
+  pull_request:
+    branches: [ "main", "dev" ]
+    paths-ignore:
+      - '**.md'
+
+# 2. 定义工作流任务
+jobs:
+  build-manager:
+    name: Build Manager - ${{ github.event.inputs.build_type || 'release' }}
+    runs-on: ubuntu-latest
+    
+    # 使用策略矩阵进行多环境构建（可选）
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-linux-android
+            platform: android-arm64
+          - target: x86_64-linux-android  
+            platform: android-x64
+
+    steps:
+      # 步骤1: 显示构建信息
+      - name: Display build parameters
+        run: |
+          echo "🎯 构建分支: ${{ github.event.inputs.target_branch }}"
+          echo "🔧 构建类型: ${{ github.event.inputs.build_type }}"
+          echo "📤 上传功能: ${{ github.event.inputs.enable_upload }}"
+          echo "💬 自定义信息: ${{ github.event.inputs.custom_message }}"
+          echo "🖥️  构建目标: ${{ matrix.target }} (${{ matrix.platform }})"
+
+      # 步骤2: 检出代码（切换到手动触发时指定的分支）
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.target_branch }}
+
+      # 步骤3: 设置构建环境（根据你的项目需要）
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      # 步骤4: 根据构建类型执行不同操作
+      - name: Build application
+        run: |
+          # 根据手动选择的构建类型执行不同命令
+          if [ "${{ github.event.inputs.build_type }}" = "release" ]; then
+            echo "执行Release构建..."
+            # 你的Release构建命令，例如：
+            # ./gradlew assembleRelease
+          else
+            echo "执行Debug构建..."
+            # 你的Debug构建命令，例如：
+            # ./gradlew assembleDebug
+          fi
+
+      # 步骤5: 条件性上传（根据布尔值输入决定）
+      - name: Upload artifacts
+        if: github.event.inputs.enable_upload == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-${{ matrix.platform }}-${{ github.event.inputs.build_type }}
+          path: |
+            app/build/outputs/**/*.apk
+            !**/*-unaligned.apk
+
+      # 步骤6: 发送通知（包含自定义消息）
+      - name: Send notification
+        if: always() && github.event.inputs.custom_message != ''
+        run: |
+          echo "构建完成: ${{ github.event.inputs.custom_message }}"
+          # 这里可以集成邮件、Slack、钉钉等通知方式
