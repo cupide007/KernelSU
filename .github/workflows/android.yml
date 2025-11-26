@@ -1,115 +1,166 @@
-name: Build Manager with Manual Trigger
+name: Build Manager
 
-# 1. 定义触发事件
 on:
-  # 手动触发事件（核心配置）
   workflow_dispatch:
     inputs:
       target_branch:
-        description: '要构建的代码所在分支'
+        description: 构建分支
         required: true
-        default: 'main'
+        default: main
         type: choice
-        options:
-          - main
-          - dev
-          - ci
+        options: [main, dev, ci]
       build_type:
-        description: '选择构建类型'
+        description: 构建类型
         required: true
-        default: 'release'
+        default: release
         type: choice
-        options:
-          - debug
-          - release
+        options: [debug, release]
       enable_upload:
-        description: '是否启用上传功能'
-        required: false
-        default: true
+        description: 启用上传
         type: boolean
-      custom_message:
-        description: '自定义构建信息（可选）'
-        required: false
-        default: '由手动触发发起的构建'
-        type: string
+        default: true
 
-  # 保留你原有的自动触发条件（根据需要保留或调整）
   push:
-    branches: [ "main", "dev", "ci" ]
+    branches: [main, dev, ci]
     paths:
-      - '.github/workflows/build-manager.yml'
-      - 'manager/**'
-      - 'kernel/**'
-  pull_request:
-    branches: [ "main", "dev" ]
-    paths-ignore:
-      - '**.md'
+      - .github/workflows/build-manager.yml
+      - manager/**
+      - kernel/**
+      - userspace/ksud/**
 
-# 2. 定义工作流任务
+  pull_request:
+    branches: [main, dev]
+    paths: [1](@ref)
+
 jobs:
-  build-manager:
-    name: Build Manager - ${{ github.event.inputs.build_type || 'release' }}
-    runs-on: ubuntu-latest
-    
-    # 使用策略矩阵进行多环境构建（可选）
+  build-lkm:
+    uses: ./.github/workflows/build-lkm.yml
+    secrets: inherit
+
+  build-ksud:
+    needs: build-lkm
     strategy:
       matrix:
-        include:
-          - target: aarch64-linux-android
-            platform: android-arm64
-          - target: x86_64-linux-android  
-            platform: android-x64
+        - target: aarch64-linux-android
+          os: ubuntu-latest
+        - target: x86_64-linux-android
+          os: ubuntu-latest
+    uses: ./.github/workflows/ksud.yml
+    with:
+      target: ${{ matrix.target }}
+      os: ${{ matrix.os }}
+
+  build-ksud-extra:
+    needs: build-lkm
+    strategy:
+      matrix:
+        - target: x86_64-pc-windows-gnu
+          os: ubuntu-latest
+        - target: x86_64-apple-darwin
+          os: macos-latest
+        - target: aarch64-apple-darwin
+          os: macos-latest
+        - target: aarch64-unknown-linux-musl
+          os: ubuntu-latest
+        - target: x86_64-unknown-linux-musl
+          os: ubuntu-latest
+    uses: ./.github/workflows/ksud.yml
+    with:
+      target: ${{ matrix.target }}
+      os: ${{ matrix.os }}
+
+  build-manager:
+    needs: build-ksud
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./manager
 
     steps:
-      # 步骤1: 显示构建信息
-      - name: Display build parameters
-        run: |
-          echo "🎯 构建分支: ${{ github.event.inputs.target_branch }}"
-          echo "🔧 构建类型: ${{ github.event.inputs.build_type }}"
-          echo "📤 上传功能: ${{ github.event.inputs.enable_upload }}"
-          echo "💬 自定义信息: ${{ github.event.inputs.custom_message }}"
-          echo "🖥️  构建目标: ${{ matrix.target }} (${{ matrix.platform }})"
-
-      # 步骤2: 检出代码（切换到手动触发时指定的分支）
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v5
         with:
-          ref: ${{ github.event.inputs.target_branch }}
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.target_branch || github.ref }}
 
-      # 步骤3: 设置构建环境（根据你的项目需要）
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '21'
-
-      # 步骤4: 根据构建类型执行不同操作
-      - name: Build application
+      - name: Setup upload flag
+        id: need_upload
         run: |
-          # 根据手动选择的构建类型执行不同命令
-          if [ "${{ github.event.inputs.build_type }}" = "release" ]; then
-            echo "执行Release构建..."
-            # 你的Release构建命令，例如：
-            # ./gradlew assembleRelease
-          else
-            echo "执行Debug构建..."
-            # 你的Debug构建命令，例如：
-            # ./gradlew assembleDebug
+          echo "UPLOAD=$(( secrets.BOT_TOKEN != '' ))" >> $GITHUB_OUTPUT
+
+      - name: Write key
+        if: ${{ (github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')) || github.ref_type == 'tag' || github.event_name == 'workflow_dispatch' }}
+        run: |
+          if [ -n "$secrets.KEYSTORE" ]; then
+            echo "KEYSTORE_PASSWORD=$secrets.KEYSTORE_PASSWORD" >> gradle.properties
+            echo "KEY_ALIAS=$secrets.KEY_ALIAS" >> gradle.properties
+            echo "KEY_PASSWORD=$secrets.KEY_PASSWORD" >> gradle.properties
+            echo "KEYSTORE_FILE=key.jks" >> gradle.properties
+            echo "$secrets.KEYSTORE" | base64 -d > key.jks
           fi
 
-      # 步骤5: 条件性上传（根据布尔值输入决定）
-      - name: Upload artifacts
-        if: github.event.inputs.enable_upload == 'true'
-        uses: actions/upload-artifact@v4
+      - name: Setup Java
+        uses: actions/setup-java@v5
         with:
-          name: app-${{ matrix.platform }}-${{ github.event.inputs.build_type }}
-          path: |
-            app/build/outputs/**/*.apk
-            !**/*-unaligned.apk
+          distribution: temurin
+          java-version: 21
 
-      # 步骤6: 发送通知（包含自定义消息）
-      - name: Send notification
-        if: always() && github.event.inputs.custom_message != ''
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v5
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Download artifacts
         run: |
-          echo "构建完成: ${{ github.event.inputs.custom_message }}"
-          # 这里可以集成邮件、Slack、钉钉等通知方式
+          actions-download-artifact@v6 -n ksud-aarch64-linux-android -p .
+          actions-download-artifact@v6 -n ksud-x86_64-linux-android -p .
+
+      - name: Copy native libs
+        run: |
+          mkdir -p app/src/main/jniLibs/{arm64-v8a,x86_64}
+          cp -f ../aarch64-linux-android/release/ksud app/src/main/jniLibs/arm64-v8a/libksud.so
+          cp -f ../x86_64-linux-android/release/ksud app/src/main/jniLibs/x86_64/libksud.so
+
+      - name: Build
+        run: ./gradlew clean assembleRelease
+
+      - name: Upload artifacts
+        if: ${{ (github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')) || github.ref_type == 'tag' || github.event_name == 'workflow_dispatch' }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: manager
+          path: manager/app/build/outputs/apk/release/*.apk
+
+      - name: Upload mappings
+        if: ${{ (github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')) || github.ref_type == 'tag' || github.event_name == 'workflow_dispatch' }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: mappings
+          path: manager/app/build/outputs/mapping/release/
+
+      - name: Cache bot session
+        if: github.event_name != 'pull_request' && steps.need_upload.outputs.UPLOAD == 'true'
+        id: bot_session_cache
+        uses: actions/cache@v4
+        with:
+          path: scripts/ksubot.session
+          key: ${{ runner.os }}-bot-session
+
+      - name: Telegram upload
+        if: github.event_name != 'pull_request' && steps.need_upload.outputs.UPLOAD == 'true'
+        env:
+          CHAT_ID: $secrets.CHAT_ID
+          BOT_TOKEN: $secrets.BOT_TOKEN
+          MESSAGE_THREAD_ID: $secrets.MESSAGE_THREAD_ID
+          COMMIT_MESSAGE: $github.event.head_commit.message
+          COMMIT_URL: $github.event.head_commit.url
+          RUN_URL: $github.server_url/$github.repository/actions/runs/$github.run_id
+          TITLE: Manager
+          BRANCH: $github.ref_name
+        run: |
+          if [ -n "$secrets.BOT_TOKEN" ]; then
+            APK=$(find ./app/build/outputs/apk/release -name "*.apk")
+            pip3 install telethon
+            python3 $GITHUB_WORKSPACE/scripts/ksubot.py $APK
+          fi
